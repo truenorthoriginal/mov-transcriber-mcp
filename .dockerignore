@@ -1,0 +1,7 @@
+node_modules
+models/*.bin
+*.MOV
+*.mov
+.git
+test.mjs
+src

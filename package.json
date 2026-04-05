@@ -1,0 +1,47 @@
+{
+  "name": "mov-transcriber-mcp",
+  "version": "1.0.0",
+  "description": "MCP server that transcribes and reads .MOV video files using ffmpeg and whisper.cpp — free, local, no API keys",
+  "main": "dist/index.js",
+  "bin": {
+    "mov-transcriber-mcp": "dist/index.js"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "start:http": "node dist/index.js --http",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build"
+  },
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "mov",
+    "transcription",
+    "whisper",
+    "whisper-cpp",
+    "ffmpeg",
+    "video",
+    "claude",
+    "cowork"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

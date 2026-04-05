@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "mov-transcriber": {
+      "command": "node",
+      "args": ["/Users/christinemccormickliddle/MOV Transcriber and reader/dist/index.js"]
+    }
+  }
+}
