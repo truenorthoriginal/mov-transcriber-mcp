@@ -1,7 +1,7 @@
 node_modules
+dist
 models/*.bin
 *.MOV
 *.mov
 .git
 test.mjs
-src

@@ -20,19 +20,24 @@ RUN git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git /tmp/whispe
 
 WORKDIR /app
 
-# Copy package files and install
-COPY package.json package-lock.json ./
-RUN npm ci --production
+# Copy package files and install all deps (including devDependencies for build)
+COPY package.json package-lock.json tsconfig.json ./
+RUN npm ci
 
-# Copy built dist
-COPY dist/ ./dist/
+# Copy source and build
+COPY src/ ./src/
+RUN npx tsc
+
+# Remove devDependencies after build
+RUN npm prune --production
 
 # Download whisper base model
 RUN mkdir -p models && \
     curl -L https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin -o models/ggml-base.bin
 
-# Expose HTTP port
+# Render sets PORT env var automatically; fallback to 3100
+ENV PORT=3100
 EXPOSE 3100
 
-# Run in HTTP mode
-CMD ["node", "dist/index.js", "--http", "--port=3100"]
+# Server auto-detects PORT env and starts in HTTP mode
+CMD ["node", "dist/index.js"]

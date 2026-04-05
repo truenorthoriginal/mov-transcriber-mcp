@@ -23,9 +23,9 @@ import { preflight, ensureModel } from "./setup.js";
 // Parse CLI args
 // ---------------------------------------------------------------------------
 const args = process.argv.slice(2);
-const useHttp = args.includes("--http") || args.includes("--sse");
+const useHttp = args.includes("--http") || args.includes("--sse") || !!process.env.PORT;
 const portArg = args.find((a) => a.startsWith("--port="));
-const HTTP_PORT = portArg ? parseInt(portArg.split("=")[1], 10) : 3100;
+const HTTP_PORT = parseInt(process.env.PORT || "", 10) || (portArg ? parseInt(portArg.split("=")[1], 10) : 3100);
 
 // ---------------------------------------------------------------------------
 // Build the MCP server with all tools
