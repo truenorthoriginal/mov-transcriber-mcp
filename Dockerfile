@@ -49,4 +49,5 @@ RUN mkdir -p models && \
 ENV PORT=3100
 EXPOSE 3100
 
-CMD ["node", "dist/index.js"]
+# Explicit --http flag so server never falls into stdio mode
+CMD ["node", "dist/index.js", "--http"]

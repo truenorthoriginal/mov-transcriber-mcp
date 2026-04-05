@@ -462,7 +462,7 @@ async function startHttpServer(mcpServer: McpServer, port: number) {
     res.end(JSON.stringify({ error: "Not found. Use /mcp or /health" }));
   });
 
-  httpServer.listen(port, () => {
+  httpServer.listen(port, "0.0.0.0", () => {
     console.error(`[mov-transcriber] MCP server running on http://localhost:${port}/mcp`);
     console.error(`[mov-transcriber] Health check: http://localhost:${port}/health`);
     console.error(`[mov-transcriber] Add to Cowork as: http://localhost:${port}/mcp`);
