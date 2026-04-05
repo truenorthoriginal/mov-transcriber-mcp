@@ -403,10 +403,13 @@ async function main() {
 }
 
 async function startHttpServer(_unused: McpServer, port: number) {
+  // Session-based: Cowork maintains a session across init → tools/list → tool calls
+  const sessions = new Map<string, { server: McpServer; transport: StreamableHTTPServerTransport }>();
+
   const httpServer = createServer(async (req, res) => {
     // CORS headers for Cowork
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS, DELETE");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id");
     res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
 
@@ -426,6 +429,7 @@ async function startHttpServer(_unused: McpServer, port: number) {
         JSON.stringify({
           status: check.errors.length === 0 ? "healthy" : "degraded",
           errors: check.errors,
+          activeSessions: sessions.size,
         })
       );
       return;
@@ -448,20 +452,51 @@ async function startHttpServer(_unused: McpServer, port: number) {
         return;
       }
 
-      // Create a fresh server + transport per request (stateless mode)
-      const server = createMcpServer();
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: undefined, // stateless
-      });
+      // Check for existing session
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
-      await server.connect(transport);
-      await transport.handleRequest(req, res, parsedBody);
+      if (sessionId && sessions.has(sessionId)) {
+        // Existing session — route to its transport
+        const session = sessions.get(sessionId)!;
+        await session.transport.handleRequest(req, res, parsedBody);
+        return;
+      }
 
-      // Clean up after response is sent
-      res.on("close", () => {
-        transport.close().catch(() => {});
-        server.close().catch(() => {});
-      });
+      // Check if this is an initialize request (new session)
+      if (isInitializeRequest(parsedBody)) {
+        const server = createMcpServer();
+        const transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => crypto.randomUUID(),
+        });
+
+        await server.connect(transport);
+
+        // Store session when transport assigns an ID
+        const onSessionId = (id: string) => {
+          sessions.set(id, { server, transport });
+          console.error(`[mov-transcriber] Session created: ${id} (${sessions.size} active)`);
+        };
+
+        // The session ID is set during handleRequest for initialize
+        transport.onclose = () => {
+          if (transport.sessionId) {
+            sessions.delete(transport.sessionId);
+            console.error(`[mov-transcriber] Session closed: ${transport.sessionId} (${sessions.size} active)`);
+          }
+        };
+
+        await transport.handleRequest(req, res, parsedBody);
+
+        // After handling, the transport should have a session ID
+        if (transport.sessionId) {
+          onSessionId(transport.sessionId);
+        }
+        return;
+      }
+
+      // Non-initialize request without valid session
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "No valid session. Send initialize first." }));
       return;
     }
 
@@ -469,11 +504,33 @@ async function startHttpServer(_unused: McpServer, port: number) {
     res.end(JSON.stringify({ error: "Not found. Use /mcp or /health" }));
   });
 
+  // Clean up stale sessions every 10 minutes
+  setInterval(() => {
+    if (sessions.size > 100) {
+      const oldest = [...sessions.entries()].slice(0, sessions.size - 50);
+      for (const [id, session] of oldest) {
+        session.transport.close().catch(() => {});
+        session.server.close().catch(() => {});
+        sessions.delete(id);
+      }
+      console.error(`[mov-transcriber] Cleaned ${oldest.length} stale sessions`);
+    }
+  }, 600_000);
+
   httpServer.listen(port, "0.0.0.0", () => {
     console.error(`[mov-transcriber] MCP server running on http://0.0.0.0:${port}/mcp`);
     console.error(`[mov-transcriber] Health check: http://0.0.0.0:${port}/health`);
-    console.error(`[mov-transcriber] Add to Cowork as: https://your-host/mcp`);
   });
+}
+
+function isInitializeRequest(body: unknown): boolean {
+  if (typeof body === "object" && body !== null && "method" in body) {
+    return (body as any).method === "initialize";
+  }
+  if (Array.isArray(body)) {
+    return body.some((msg) => msg.method === "initialize");
+  }
+  return false;
 }
 
 main().catch((err) => {
