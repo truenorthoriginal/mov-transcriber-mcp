@@ -402,12 +402,13 @@ async function main() {
   }
 }
 
-async function startHttpServer(mcpServer: McpServer, port: number) {
+async function startHttpServer(_unused: McpServer, port: number) {
   const httpServer = createServer(async (req, res) => {
     // CORS headers for Cowork
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS, DELETE");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id");
+    res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
 
     if (req.method === "OPTIONS") {
       res.writeHead(204);
@@ -447,14 +448,20 @@ async function startHttpServer(mcpServer: McpServer, port: number) {
         return;
       }
 
+      // Create a fresh server + transport per request (stateless mode)
+      const server = createMcpServer();
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined, // stateless
       });
 
-      // Connect the MCP server for this request
-      await mcpServer.connect(transport);
-
+      await server.connect(transport);
       await transport.handleRequest(req, res, parsedBody);
+
+      // Clean up after response is sent
+      res.on("close", () => {
+        transport.close().catch(() => {});
+        server.close().catch(() => {});
+      });
       return;
     }
 
@@ -463,9 +470,9 @@ async function startHttpServer(mcpServer: McpServer, port: number) {
   });
 
   httpServer.listen(port, "0.0.0.0", () => {
-    console.error(`[mov-transcriber] MCP server running on http://localhost:${port}/mcp`);
-    console.error(`[mov-transcriber] Health check: http://localhost:${port}/health`);
-    console.error(`[mov-transcriber] Add to Cowork as: http://localhost:${port}/mcp`);
+    console.error(`[mov-transcriber] MCP server running on http://0.0.0.0:${port}/mcp`);
+    console.error(`[mov-transcriber] Health check: http://0.0.0.0:${port}/health`);
+    console.error(`[mov-transcriber] Add to Cowork as: https://your-host/mcp`);
   });
 }
 
