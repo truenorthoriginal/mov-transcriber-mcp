@@ -5,8 +5,9 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { createServer } from "node:http";
-import { access } from "node:fs/promises";
-import { resolve } from "node:path";
+import { access, writeFile, mkdtemp } from "node:fs/promises";
+import { resolve, join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   getVideoMetadata,
   extractAudio,
@@ -373,12 +374,219 @@ function createMcpServer(): McpServer {
     }
   );
 
+  // ---- Tool: transcribe_video_url ----
+  server.tool(
+    "transcribe_video_url",
+    "Transcribe speech from a video at a URL. Downloads the video server-side, then transcribes. " +
+      "Use this in Cowork when a video has been uploaded and you have its URL.",
+    {
+      url: z
+        .string()
+        .describe("URL to the video file (http or https)"),
+      language: z
+        .string()
+        .optional()
+        .describe("ISO 639-1 language code. Auto-detected if omitted."),
+      model_size: z
+        .enum(["tiny", "base", "small", "medium", "large"])
+        .optional()
+        .describe("Whisper model size (default: base)."),
+    },
+    async ({ url, language, model_size }) => {
+      await ensureModel(model_size || "base");
+      const { videoPath, tempDir } = await downloadVideo(url);
+      let audioTempDir: string | undefined;
+
+      try {
+        const extraction = await extractAudio(videoPath);
+        audioTempDir = extraction.tempDir;
+
+        const result = await transcribe(extraction.audioPath, model_size || "base", language);
+        const metadata = await getVideoMetadata(videoPath);
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                {
+                  transcription: result.text,
+                  segments: result.segments,
+                  language: result.language || "auto-detected",
+                  video: {
+                    duration: metadata.duration,
+                    durationSeconds: metadata.durationSeconds,
+                    format: metadata.format,
+                    size: metadata.size,
+                  },
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } finally {
+        await cleanupTemp(tempDir);
+        if (audioTempDir) await cleanupTemp(audioTempDir);
+      }
+    }
+  );
+
+  // ---- Tool: analyze_video_url ----
+  server.tool(
+    "analyze_video_url",
+    "Full video analysis from a URL: downloads the video, transcribes speech with timestamps, " +
+      "extracts frames at key moments, and analyzes audio levels. " +
+      "Use this in Cowork when a video has been uploaded and you have its URL.",
+    {
+      url: z
+        .string()
+        .describe("URL to the video file (http or https)"),
+      frame_count: z
+        .number()
+        .int()
+        .min(1)
+        .max(20)
+        .optional()
+        .describe("Number of frames for visual analysis (default: 6)"),
+      language: z
+        .string()
+        .optional()
+        .describe("ISO 639-1 language code. Auto-detected if omitted."),
+      model_size: z
+        .enum(["tiny", "base", "small", "medium", "large"])
+        .optional()
+        .describe("Whisper model size (default: base)."),
+    },
+    async ({ url, frame_count, language, model_size }) => {
+      await ensureModel(model_size || "base");
+      const { videoPath, tempDir: uploadDir } = await downloadVideo(url);
+
+      let audioTempDir: string | undefined;
+      let frameTempDir: string | undefined;
+
+      try {
+        const metadata = await getVideoMetadata(videoPath);
+        const extraction = await extractAudio(videoPath);
+        audioTempDir = extraction.tempDir;
+
+        const transcription = await transcribe(extraction.audioPath, model_size || "base", language);
+        const audioLevels = await analyzeAudioLevels(videoPath);
+
+        const numFrames = frame_count || 6;
+        let frameTimestamps: number[];
+
+        if (transcription.segments.length >= numFrames) {
+          const step = Math.floor(transcription.segments.length / numFrames);
+          frameTimestamps = Array.from(
+            { length: numFrames },
+            (_, i) =>
+              transcription.segments[
+                Math.min(i * step, transcription.segments.length - 1)
+              ].startSeconds
+          );
+        } else {
+          const interval = metadata.durationSeconds / (numFrames + 1);
+          frameTimestamps = Array.from(
+            { length: numFrames },
+            (_, i) => interval * (i + 1)
+          );
+        }
+
+        const { frames, tempDir } = await extractFramesAtTimestamps(videoPath, frameTimestamps);
+        frameTempDir = tempDir;
+
+        const content: Array<
+          | { type: "text"; text: string }
+          | { type: "image"; data: string; mimeType: string }
+        > = [];
+
+        const videoStream = metadata.streams.find((s) => s.codecType === "video");
+        content.push({
+          type: "text" as const,
+          text: [
+            `# Video Analysis: ${url.split("/").pop() || "video"}`,
+            ``,
+            `**Duration:** ${metadata.duration} | **Resolution:** ${videoStream?.width}x${videoStream?.height} | **Size:** ${metadata.size}`,
+            `**Format:** ${metadata.format} | **Bitrate:** ${metadata.bitRate}`,
+            `**Language:** ${transcription.language || "auto-detected"}`,
+            ``,
+            `## Timestamped Transcript`,
+            ``,
+            ...transcription.segments.map(
+              (seg) => `**[${seg.start} → ${seg.end}]** ${seg.text}`
+            ),
+            ``,
+            `## Audio Activity`,
+            ``,
+            ...audioLevels.map((seg) => {
+              const bar = seg.isSilent
+                ? "silent"
+                : "speech".repeat(Math.min(3, Math.max(1, Math.round((seg.volumeDb + 50) / 10))));
+              return `**${seg.start} → ${seg.end}** [${bar}] ${seg.volumeDb.toFixed(1)} dB${seg.isSilent ? " (silent)" : ""}`;
+            }),
+            ``,
+            `## Visual Frames`,
+            ``,
+            `Each frame is labeled with its timestamp. Cross-reference with the transcript above.`,
+          ].join("\n"),
+        });
+
+        for (const frame of frames) {
+          const matchingSeg = transcription.segments.find(
+            (seg) =>
+              frame.timestampSeconds >= seg.startSeconds &&
+              frame.timestampSeconds <= seg.endSeconds
+          );
+          const spokenAt = matchingSeg
+            ? `Speaking: "${matchingSeg.text}"`
+            : "(no speech at this moment)";
+
+          content.push({
+            type: "text" as const,
+            text: `\n### Frame at ${frame.timestamp} (${frame.timestampSeconds.toFixed(1)}s)\n${spokenAt}`,
+          });
+          content.push({
+            type: "image" as const,
+            data: frame.data.toString("base64"),
+            mimeType: "image/jpeg",
+          });
+        }
+
+        return { content };
+      } finally {
+        await cleanupTemp(uploadDir);
+        if (audioTempDir) await cleanupTemp(audioTempDir);
+        if (frameTempDir) await cleanupTemp(frameTempDir);
+      }
+    }
+  );
+
   return server;
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+async function downloadVideo(url: string): Promise<{ videoPath: string; tempDir: string }> {
+  const tempDir = await mkdtemp(join(tmpdir(), "mov-download-"));
+  // Extract filename from URL or default to video.mov
+  const urlPath = new URL(url).pathname;
+  const filename = urlPath.split("/").pop() || "video.mov";
+  const videoPath = join(tempDir, filename);
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to download video: HTTP ${response.status} from ${url}`);
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+  await writeFile(videoPath, buffer);
+
+  return { videoPath, tempDir };
+}
+
 async function assertFileExists(filePath: string): Promise<void> {
   try {
     await access(filePath);
@@ -432,6 +640,28 @@ async function startHttpServer(_unused: McpServer, port: number) {
           activeSessions: sessions.size,
         })
       );
+      return;
+    }
+
+    // Upload endpoint — accepts raw video POST, saves to temp, returns server path
+    // Cowork or any client can POST a video here, then use the returned path with the MCP tools
+    if (req.url === "/upload" && req.method === "POST") {
+      const uploadDir = await mkdtemp(join(tmpdir(), "mov-upload-"));
+      const filename = (req.headers["x-filename"] as string) || "video.mov";
+      const videoPath = join(uploadDir, filename);
+
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) {
+        chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+      }
+      await writeFile(videoPath, Buffer.concat(chunks));
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        file_path: videoPath,
+        size: Buffer.concat(chunks).length,
+        message: "File uploaded. Use this file_path with transcribe_video or analyze_video tools.",
+      }));
       return;
     }
 
